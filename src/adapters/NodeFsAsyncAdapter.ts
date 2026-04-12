@@ -7,6 +7,7 @@ import type {AsyncFilesystemInterface, CopyOptions} from '../interfaces';
 import {
     FileAlreadyExistsException,
     FileNotFoundException,
+    PermissionDeniedException,
     SymbolicLinkException,
     TempFileCreationException,
 } from '../exceptions';
@@ -75,29 +76,33 @@ export class NodeFsAsyncAdapter implements AsyncFilesystemInterface {
         const preservePermissions = options?.preservePermissions ?? false;
 
         try {
+            // Single stat() call to verify existence + readability (reduces TOCTOU window)
             let stat: nodeFs.Stats;
             try {
                 stat = await fs.stat(originFile);
-            } catch {
-                throw new FileNotFoundException(
-                    `File not found: ${originFile}`,
-                    originFile,
-                );
+            } catch (error) {
+                const nodeError = error as NodeJS.ErrnoException;
+                if (nodeError.code === 'ENOENT') {
+                    throw new FileNotFoundException(
+                        `File not found: ${originFile}`,
+                        originFile,
+                    );
+                }
+                if (nodeError.code === 'EACCES') {
+                    throw new PermissionDeniedException(
+                        `Source file is not readable: ${originFile}`,
+                        originFile,
+                    );
+                }
+                mapError(error, originFile, 'file');
+                return;
             }
 
-            if (!overwrite) {
-                try {
-                    await fs.access(targetFile);
-                    throw new FileAlreadyExistsException(
-                        `File already exists: ${targetFile}`,
-                        targetFile,
-                    );
-                } catch (error) {
-                    if (error instanceof FileAlreadyExistsException) {
-                        throw error;
-                    }
-                    // File doesn't exist — proceed
-                }
+            if (!overwrite && await this.exists(targetFile)) {
+                throw new FileAlreadyExistsException(
+                    `File already exists: ${targetFile}`,
+                    targetFile,
+                );
             }
 
             // Ensure target directory exists
@@ -117,7 +122,8 @@ export class NodeFsAsyncAdapter implements AsyncFilesystemInterface {
         } catch (error) {
             if (
                 error instanceof FileNotFoundException ||
-                error instanceof FileAlreadyExistsException
+                error instanceof FileAlreadyExistsException ||
+                error instanceof PermissionDeniedException
             ) {
                 throw error;
             }
@@ -127,27 +133,26 @@ export class NodeFsAsyncAdapter implements AsyncFilesystemInterface {
 
     async rename(origin: string, target: string, overwrite: boolean = true): Promise<void> {
         try {
-            try {
-                await fs.access(origin);
-            } catch {
-                throw new FileNotFoundException(
-                    `File not found: ${origin}`,
+            // Verify the source is readable (mirrors Symfony's is_readable check)
+            if (!await this.isReadable(origin)) {
+                // Distinguish between "not found" and "not readable"
+                if (!await this.exists(origin)) {
+                    throw new FileNotFoundException(
+                        `File not found: ${origin}`,
+                        origin,
+                    );
+                }
+                throw new PermissionDeniedException(
+                    `Source is not readable: ${origin}`,
                     origin,
                 );
             }
 
-            if (!overwrite) {
-                try {
-                    await fs.access(target);
-                    throw new FileAlreadyExistsException(
-                        `File already exists: ${target}`,
-                        target,
-                    );
-                } catch (error) {
-                    if (error instanceof FileAlreadyExistsException) {
-                        throw error;
-                    }
-                }
+            if (!overwrite && await this.exists(target)) {
+                throw new FileAlreadyExistsException(
+                    `File already exists: ${target}`,
+                    target,
+                );
             }
 
             // Ensure target directory exists
@@ -158,7 +163,8 @@ export class NodeFsAsyncAdapter implements AsyncFilesystemInterface {
         } catch (error) {
             if (
                 error instanceof FileNotFoundException ||
-                error instanceof FileAlreadyExistsException
+                error instanceof FileAlreadyExistsException ||
+                error instanceof PermissionDeniedException
             ) {
                 throw error;
             }

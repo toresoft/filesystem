@@ -7,6 +7,7 @@ import {
     FileNotFoundException,
     InvalidArgumentException,
     IOException,
+    PermissionDeniedException,
     SymbolicLinkException,
     TempFileCreationException,
 } from '../../exceptions';
@@ -87,6 +88,14 @@ export class InMemorySyncAdapter implements SyncFilesystemInterface {
             );
         }
 
+        // Verify the source file is readable (mirrors Symfony's is_readable check)
+        if ((sourceNode.permissions & 0o400) === 0) {
+            throw new PermissionDeniedException(
+                `Source file is not readable: ${originFile}`,
+                originFile,
+            );
+        }
+
         const existingTarget = this.getNode(targetResolved);
         if (!overwrite && existingTarget) {
             throw new FileAlreadyExistsException(
@@ -110,6 +119,14 @@ export class InMemorySyncAdapter implements SyncFilesystemInterface {
         if (!node && !isSymlink) {
             throw new FileNotFoundException(
                 `Path not found: ${origin}`,
+                origin,
+            );
+        }
+
+        // Verify the source is readable (mirrors Symfony's is_readable check)
+        if (node && node.type === 'file' && (node.permissions & 0o400) === 0) {
+            throw new PermissionDeniedException(
+                `Source is not readable: ${origin}`,
                 origin,
             );
         }

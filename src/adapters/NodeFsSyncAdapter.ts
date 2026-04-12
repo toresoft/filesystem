@@ -7,6 +7,7 @@ import {
     FileAlreadyExistsException,
     FileNotFoundException,
     InvalidArgumentException,
+    PermissionDeniedException,
     SymbolicLinkException,
     TempFileCreationException,
 } from '../exceptions';
@@ -67,14 +68,29 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         const preservePermissions = options?.preservePermissions ?? false;
 
         try {
-            if (!fs.existsSync(originFile)) {
-                throw new FileNotFoundException(
-                    `File not found: ${originFile}`,
-                    originFile,
-                );
+            // Single statSync() call to verify existence + readability (reduces TOCTOU window)
+            let stat: fs.Stats;
+            try {
+                stat = fs.statSync(originFile);
+            } catch (error) {
+                const nodeError = error as NodeJS.ErrnoException;
+                if (nodeError.code === 'ENOENT') {
+                    throw new FileNotFoundException(
+                        `File not found: ${originFile}`,
+                        originFile,
+                    );
+                }
+                if (nodeError.code === 'EACCES') {
+                    throw new PermissionDeniedException(
+                        `Source file is not readable: ${originFile}`,
+                        originFile,
+                    );
+                }
+                mapError(error, originFile, 'file');
+                return;
             }
 
-            if (!overwrite && fs.existsSync(targetFile)) {
+            if (!overwrite && this.exists(targetFile)) {
                 throw new FileAlreadyExistsException(
                     `File already exists: ${targetFile}`,
                     targetFile,
@@ -83,11 +99,7 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
             // Ensure target directory exists
             const targetDir = path.dirname(targetFile);
-            if (!fs.existsSync(targetDir)) {
-                fs.mkdirSync(targetDir, { recursive: true });
-            }
-
-            const stat = fs.statSync(originFile);
+            fs.mkdirSync(targetDir, { recursive: true });
 
             // copyFileSync is always the most efficient option in sync mode
             // (streaming is async-only)
@@ -99,7 +111,8 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         } catch (error) {
             if (
                 error instanceof FileNotFoundException ||
-                error instanceof FileAlreadyExistsException
+                error instanceof FileAlreadyExistsException ||
+                error instanceof PermissionDeniedException
             ) {
                 throw error;
             }
@@ -109,14 +122,22 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     rename(origin: string, target: string, overwrite: boolean = true): void {
         try {
-            if (!fs.existsSync(origin)) {
-                throw new FileNotFoundException(
-                    `File not found: ${origin}`,
+            // Verify the source is readable (mirrors Symfony's is_readable check)
+            if (!this.isReadable(origin)) {
+                // Distinguish between "not found" and "not readable"
+                if (!this.exists(origin)) {
+                    throw new FileNotFoundException(
+                        `File not found: ${origin}`,
+                        origin,
+                    );
+                }
+                throw new PermissionDeniedException(
+                    `Source is not readable: ${origin}`,
                     origin,
                 );
             }
 
-            if (!overwrite && fs.existsSync(target)) {
+            if (!overwrite && this.exists(target)) {
                 throw new FileAlreadyExistsException(
                     `File already exists: ${target}`,
                     target,
@@ -125,15 +146,14 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
             // Ensure target directory exists
             const targetDir = path.dirname(target);
-            if (!fs.existsSync(targetDir)) {
-                fs.mkdirSync(targetDir, { recursive: true });
-            }
+            fs.mkdirSync(targetDir, { recursive: true });
 
             fs.renameSync(origin, target);
         } catch (error) {
             if (
                 error instanceof FileNotFoundException ||
-                error instanceof FileAlreadyExistsException
+                error instanceof FileAlreadyExistsException ||
+                error instanceof PermissionDeniedException
             ) {
                 throw error;
             }
