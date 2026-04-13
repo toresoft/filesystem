@@ -1,4 +1,3 @@
-import type {Readable} from 'node:stream';
 import type {CopyOptions} from './CopyOptions.js';
 
 /**
@@ -76,18 +75,13 @@ export interface SyncFilesystemInterface {
 
     /**
      * Writes content to a file atomically.
-     * Accepts string, Buffer, or Readable stream.
-     * Note: Readable streams are NOT supported in sync mode and will throw.
-     * @throws {InvalidArgumentException} if content is a Readable stream
      */
-    dumpFile(filename: string, content: string | Buffer | Readable): void;
+    dumpFile(filename: string, content: string | Buffer): void;
 
     /**
      * Appends content to an existing file.
-     * Note: Readable streams are NOT supported in sync mode and will throw.
-     * @throws {InvalidArgumentException} if content is a Readable stream
      */
-    appendToFile(filename: string, content: string | Buffer | Readable): void;
+    appendToFile(filename: string, content: string | Buffer): void;
 
     // --- Permissions ---
 

@@ -1,12 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import {Readable} from 'node:stream';
 import type {CopyOptions, SyncFilesystemInterface} from '../interfaces';
 import {
     FileAlreadyExistsException,
     FileNotFoundException,
-    InvalidArgumentException,
     PermissionDeniedException,
     SymbolicLinkException,
     TempFileCreationException,
@@ -15,27 +13,63 @@ import {mapError} from '../internal';
 
 /**
  * Synchronous filesystem adapter using Node.js `node:fs` module.
+ *
+ * Provides blocking filesystem operations that mirror the behaviour of
+ * Symfony's Filesystem component. Every method maps raw Node.js errors
+ * to library-specific exceptions for consistent error handling.
+ *
+ * @example
+ * ```typescript
+ * const adapter = new NodeFsSyncAdapter();
+ * adapter.mkdir('/tmp/my-project');
+ * adapter.dumpFile('/tmp/my-project/hello.txt', 'Hello, world!');
+ * console.log(adapter.readFile('/tmp/my-project/hello.txt'));
+ * ```
  */
 export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Directory operations ---
 
+    /**
+     * Creates one or more directories recursively.
+     *
+     * If a directory already exists the call is silently skipped (idempotent).
+     * If a **file** exists at the target path, a {@link DirectoryAlreadyExistsException}
+     * is thrown. Parent directories are created automatically.
+     *
+     * @param paths - A single path or an array of paths to create.
+     * @param mode - The file mode (permissions) for created directories. Defaults to `0o777`.
+     *
+     * @throws {DirectoryAlreadyExistsException} If a file (not a directory) already exists at a target path.
+     * @throws {PermissionDeniedException} If the process lacks write permissions on the parent directory.
+     *
+     * @sideeffect Creates directories on the physical filesystem.
+     */
     mkdir(paths: string | string[], mode: number = 0o777): void {
         const normalized = this.normalizePaths(paths);
-        for (const p of normalized) {
+        for (const filePath of normalized) {
             try {
-                fs.mkdirSync(p, { recursive: true, mode });
+                fs.mkdirSync(filePath, { recursive: true, mode });
             } catch (error) {
-                mapError(error, p, 'directory');
+                mapError(error, filePath, 'directory');
             }
         }
     }
 
+    /**
+     * Checks whether all given paths exist on the filesystem.
+     *
+     * Uses `fs.accessSync` internally, so the check verifies that the
+     * current process has at least **read** access to every path.
+     *
+     * @param paths - A single path or an array of paths to check.
+     * @returns `true` if every path exists and is accessible, `false` otherwise.
+     */
     exists(paths: string | string[]): boolean {
         const normalized = this.normalizePaths(paths);
-        return normalized.every((p) => {
+        return normalized.every((filePath) => {
             try {
-                fs.accessSync(p);
+                fs.accessSync(filePath);
                 return true;
             } catch {
                 return false;
@@ -43,6 +77,15 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         });
     }
 
+    /**
+     * Returns whether the given path points to a directory.
+     *
+     * Returns `false` (instead of throwing) if the path does not exist
+     * or is not accessible.
+     *
+     * @param path - The path to check.
+     * @returns `true` if the path exists and is a directory, `false` otherwise.
+     */
     isDirectory(path: string): boolean {
         try {
             const stat = fs.statSync(path);
@@ -52,6 +95,15 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Returns whether the given path points to a regular file.
+     *
+     * Returns `false` (instead of throwing) if the path does not exist
+     * or is not accessible.
+     *
+     * @param path - The path to check.
+     * @returns `true` if the path exists and is a regular file, `false` otherwise.
+     */
     isFile(path: string): boolean {
         try {
             const stat = fs.statSync(path);
@@ -63,6 +115,25 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- File operations ---
 
+    /**
+     * Copies a single file from `originFile` to `targetFile`.
+     *
+     * The target directory is created automatically if it does not exist.
+     * By default the copy overwrites an existing target (mirroring `cp` behaviour).
+     * Uses `fs.copyFileSync` internally — no streaming overhead.
+     *
+     * @param originFile - Absolute path of the source file.
+     * @param targetFile - Absolute path of the destination file.
+     * @param options - Optional copy behaviour:
+     *   - `overwrite` — Whether to overwrite an existing target. Defaults to `true`.
+     *   - `preservePermissions` — Whether to copy the source file's mode to the target. Defaults to `false`.
+     *
+     * @throws {FileNotFoundException} If the source file does not exist.
+     * @throws {PermissionDeniedException} If the source file is not readable (Linux `EACCES`).
+     * @throws {FileAlreadyExistsException} If the target exists and `overwrite` is `false`.
+     *
+     * @sideeffect Creates the target directory tree and writes the target file to disk.
+     */
     copy(originFile: string, targetFile: string, options?: CopyOptions): void {
         const overwrite = options?.overwrite ?? true;
         const preservePermissions = options?.preservePermissions ?? false;
@@ -87,7 +158,6 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
                     );
                 }
                 mapError(error, originFile, 'file');
-                return;
             }
 
             if (!overwrite && this.exists(targetFile)) {
@@ -120,24 +190,35 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Renames or moves a file or directory.
+     *
+     * Note: This method only checks for source existence, not readability.
+     * On Linux, rename(2) does not require read permissions on the source,
+     * only write permissions on the parent directory. This differs from the
+     * previous implementation which also checked source readability.
+     *
+     * The target directory is created automatically if it does not exist.
+     *
+     * @param origin - Absolute path of the source file or directory.
+     * @param target - Absolute path of the destination.
+     * @param overwrite - Whether to overwrite an existing target. Defaults to `true`.
+     *
+     * @throws {FileNotFoundException} If the source does not exist.
+     * @throws {FileAlreadyExistsException} If the target exists and `overwrite` is `false`.
+     *
+     * @sideeffect Creates the target directory tree and moves the filesystem entry.
+     */
     rename(origin: string, target: string, overwrite: boolean = true): void {
         try {
-            // Verify the source is readable (mirrors Symfony's is_readable check)
-            if (!this.isReadable(origin)) {
-                // Distinguish between "not found" and "not readable"
-                if (!this.exists(origin)) {
-                    throw new FileNotFoundException(
-                        `File not found: ${origin}`,
-                        origin,
-                    );
-                }
-                throw new PermissionDeniedException(
-                    `Source is not readable: ${origin}`,
+            if (!fs.existsSync(origin)) {
+                throw new FileNotFoundException(
+                    `File not found: ${origin}`,
                     origin,
                 );
             }
 
-            if (!overwrite && this.exists(target)) {
+            if (!overwrite && fs.existsSync(target)) {
                 throw new FileAlreadyExistsException(
                     `File already exists: ${target}`,
                     target,
@@ -152,8 +233,7 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         } catch (error) {
             if (
                 error instanceof FileNotFoundException ||
-                error instanceof FileAlreadyExistsException ||
-                error instanceof PermissionDeniedException
+                error instanceof FileAlreadyExistsException
             ) {
                 throw error;
             }
@@ -161,31 +241,45 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Removes one or more files or directories recursively.
+     *
+     * When multiple paths are provided, all removal attempts are executed
+     * even if some fail. If more than one error occurs an
+     * {@link AggregateError} is thrown containing all individual errors.
+     *
+     * @param paths - A single path or an array of paths to remove.
+     *
+     * @throws {FileNotFoundException} If a path does not exist.
+     * @throws {AggregateError} If multiple paths fail to be removed.
+     *
+     * @sideeffect Deletes files and directory trees from the physical filesystem.
+     */
     remove(paths: string | string[]): void {
         const normalized = this.normalizePaths(paths);
         const errors: Error[] = [];
 
-        for (const p of normalized) {
+        for (const filePath of normalized) {
             try {
-                if (!fs.existsSync(p)) {
+                if (!fs.existsSync(filePath)) {
                     throw new FileNotFoundException(
-                        `Path not found: ${p}`,
-                        p,
+                        `Path not found: ${filePath}`,
+                        filePath,
                     );
                 }
 
-                const stat = fs.statSync(p);
+                const stat = fs.statSync(filePath);
                 if (stat.isDirectory()) {
-                    fs.rmSync(p, { recursive: true, force: true });
+                    fs.rmSync(filePath, { recursive: true, force: true });
                 } else {
-                    fs.unlinkSync(p);
+                    fs.unlinkSync(filePath);
                 }
             } catch (error) {
                 if (error instanceof FileNotFoundException) {
                     errors.push(error);
                 } else {
                     try {
-                        mapError(error, p);
+                        mapError(error, filePath);
                     } catch (mapped) {
                         errors.push(mapped instanceof Error ? mapped : new Error(String(mapped)));
                     }
@@ -201,32 +295,48 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Sets the access and modification times of the given paths.
+     *
+     * If a file does not exist it is **created** as an empty file,
+     * mirroring the behaviour of the POSIX `touch` command.
+     * Parent directories are created automatically when a new file needs
+     * to be created.
+     *
+     * @param paths - A single path or an array of paths to touch.
+     * @param time - The modification time to set. Defaults to `new Date()`.
+     * @param atime - The access time to set. Defaults to the value of `time`.
+     *
+     * @throws {IOException} If the times cannot be set on an existing file.
+     *
+     * @sideeffect May create empty files and directories on disk.
+     */
     touch(paths: string | string[], time?: Date, atime?: Date): void {
         const normalized = this.normalizePaths(paths);
         const mtime = time ?? new Date();
         const atimeVal = atime ?? mtime;
 
-        for (const p of normalized) {
+        for (const filePath of normalized) {
             try {
                 // Ensure directory exists
-                const dir = path.dirname(p);
+                const dir = path.dirname(filePath);
                 if (!fs.existsSync(dir)) {
                     fs.mkdirSync(dir, { recursive: true });
                 }
 
-                fs.utimesSync(p, atimeVal, mtime);
+                fs.utimesSync(filePath, atimeVal, mtime);
             } catch (error) {
                 const nodeError = error as NodeJS.ErrnoException;
                 if (nodeError.code === 'ENOENT') {
                     // File doesn't exist — create it, then set timestamps
                     try {
-                        fs.writeFileSync(p, '');
-                        fs.utimesSync(p, atimeVal, mtime);
+                        fs.writeFileSync(filePath, '');
+                        fs.utimesSync(filePath, atimeVal, mtime);
                     } catch (writeError) {
-                        mapError(writeError, p, 'file');
+                        mapError(writeError, filePath, 'file');
                     }
                 } else {
-                    mapError(error, p, 'file');
+                    mapError(error, filePath, 'file');
                 }
             }
         }
@@ -234,6 +344,16 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Read/Write ---
 
+    /**
+     * Reads a file and returns its content as a string.
+     *
+     * @param filename - Absolute path of the file to read.
+     * @param encoding - The text encoding to use. Defaults to `'utf8'`.
+     * @returns The file content decoded with the specified encoding.
+     *
+     * @throws {FileNotFoundException} If the file does not exist.
+     * @throws {PermissionDeniedException} If the file is not readable.
+     */
     readFile(filename: string, encoding: BufferEncoding = 'utf8'): string {
         try {
             return fs.readFileSync(filename, encoding);
@@ -242,6 +362,15 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Reads a file and returns its raw content as a {@link Buffer}.
+     *
+     * @param filename - Absolute path of the file to read.
+     * @returns The raw file content.
+     *
+     * @throws {FileNotFoundException} If the file does not exist.
+     * @throws {PermissionDeniedException} If the file is not readable.
+     */
     readFileAsBuffer(filename: string): Buffer {
         try {
             return fs.readFileSync(filename);
@@ -250,13 +379,23 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
-    dumpFile(filename: string, content: string | Buffer | Readable): void {
-        if (content instanceof Readable) {
-            throw new InvalidArgumentException(
-                'Readable streams are not supported in synchronous mode. Use the async API instead.',
-            );
-        }
-
+    /**
+     * Writes content to a file atomically.
+     *
+     * The write is performed by first writing to a hidden temporary file
+     * (`.~<uuid>.tmp`) in the same directory, then renaming it to the
+     * target path. This reduces the risk of partial writes on crash.
+     * Parent directories are created automatically.
+     *
+     * @param filename - Absolute path of the target file.
+     * @param content - The content to write. Must be a `string` or `Buffer`.
+     *
+     * @throws {PermissionDeniedException} If the target directory or file is not writable.
+     *
+     * @sideeffect Creates the target directory tree and writes the file to disk.
+     *   A temporary file may briefly exist in the same directory during the operation.
+     */
+    dumpFile(filename: string, content: string | Buffer): void {
         // Ensure directory exists
         const dir = path.dirname(filename);
         if (!fs.existsSync(dir)) {
@@ -276,13 +415,20 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
-    appendToFile(filename: string, content: string | Buffer | Readable): void {
-        if (content instanceof Readable) {
-            throw new InvalidArgumentException(
-                'Readable streams are not supported in synchronous mode. Use the async API instead.',
-            );
-        }
-
+    /**
+     * Appends content to an existing file.
+     *
+     * If the file does not exist it is created automatically.
+     * Parent directories are created automatically.
+     *
+     * @param filename - Absolute path of the target file.
+     * @param content - The content to append. Must be a `string` or `Buffer`.
+     *
+     * @throws {PermissionDeniedException} If the file is not writable.
+     *
+     * @sideeffect Creates the target directory tree and appends to (or creates) the file.
+     */
+    appendToFile(filename: string, content: string | Buffer): void {
         try {
             // Ensure directory exists
             const dir = path.dirname(filename);
@@ -298,30 +444,71 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Permissions ---
 
+    /**
+     * Changes the file mode (permissions) of one or more paths.
+     *
+     * @param paths - A single path or an array of paths.
+     * @param mode - The numeric file mode (e.g. `0o755`).
+     *
+     * @throws {FileNotFoundException} If a path does not exist.
+     * @throws {PermissionDeniedException} If the process lacks permission to change mode.
+     *
+     * @sideeffect Modifies filesystem permissions.
+     */
     chmod(paths: string | string[], mode: number): void {
         const normalized = this.normalizePaths(paths);
-        for (const p of normalized) {
+        for (const filePath of normalized) {
             try {
-                fs.chmodSync(p, mode);
+                fs.chmodSync(filePath, mode);
             } catch (error) {
-                mapError(error, p);
+                mapError(error, filePath);
             }
         }
     }
 
+    /**
+     * Changes the owner (uid and gid) of one or more paths.
+     *
+     * On Linux, this requires the process to run as root or to be the
+     * current owner of the file.
+     *
+     * @param paths - A single path or an array of paths.
+     * @param uid - The numeric user ID.
+     * @param gid - The numeric group ID.
+     *
+     * @throws {FileNotFoundException} If a path does not exist.
+     * @throws {PermissionDeniedException} If the process lacks permission to change ownership.
+     *
+     * @sideeffect Modifies file ownership on the filesystem.
+     *
+     * @platform Linux / macOS — has no effect or throws on Windows.
+     */
     chown(paths: string | string[], uid: number, gid: number): void {
         const normalized = this.normalizePaths(paths);
-        for (const p of normalized) {
+        for (const filePath of normalized) {
             try {
-                fs.chownSync(p, uid, gid);
+                fs.chownSync(filePath, uid, gid);
             } catch (error) {
-                mapError(error, p);
+                mapError(error, filePath);
             }
         }
     }
 
     // --- Symlinks ---
 
+    /**
+     * Creates a symbolic link.
+     *
+     * The parent directory of `target` is created automatically if it
+     * does not exist.
+     *
+     * @param origin - The existing file or directory that the link points to.
+     * @param target - The path where the symbolic link will be created.
+     *
+     * @throws {SymbolicLinkException} If the link cannot be created (e.g. target already exists).
+     *
+     * @sideeffect Creates a symbolic link on the filesystem and may create parent directories.
+     */
     symlink(origin: string, target: string): void {
         try {
             // Ensure target directory exists
@@ -348,6 +535,17 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Reads the target of a symbolic link.
+     *
+     * @param linkPath - The path of the symbolic link.
+     * @param canonicalize - If `true`, resolves the link target to its
+     *   full canonical (absolute) path using `fs.realpathSync.native`.
+     *   Defaults to `false`.
+     * @returns The link target path (relative or canonical depending on `canonicalize`).
+     *
+     * @throws {SymbolicLinkException} If the path is not a symbolic link or cannot be read.
+     */
     readlink(linkPath: string, canonicalize: boolean = false): string {
         try {
             let target = fs.readlinkSync(linkPath);
@@ -378,6 +576,14 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Checks ---
 
+    /**
+     * Checks whether a path is readable by the current process.
+     *
+     * Uses `fs.accessSync` with `R_OK` to verify read access.
+     *
+     * @param path - The path to check.
+     * @returns `true` if the path exists and is readable, `false` otherwise.
+     */
     isReadable(path: string): boolean {
         try {
             fs.accessSync(path, fs.constants.R_OK);
@@ -387,6 +593,14 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
         }
     }
 
+    /**
+     * Checks whether a path is writable by the current process.
+     *
+     * Uses `fs.accessSync` with `W_OK` to verify write access.
+     *
+     * @param path - The path to check.
+     * @returns `true` if the path exists and is writable, `false` otherwise.
+     */
     isWritable(path: string): boolean {
         try {
             fs.accessSync(path, fs.constants.W_OK);
@@ -398,14 +612,28 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Temp ---
 
+    /**
+     * Creates a temporary file with a unique name in the specified directory.
+     *
+     * The file name is composed of the given `prefix` followed by a
+     * cryptographically random UUID (via `crypto.randomUUID()`).
+     * The directory is created automatically if it does not exist.
+     *
+     * @param dir - The directory in which to create the temporary file.
+     * @param prefix - A prefix for the generated file name (e.g. `'tmp-'`).
+     * @returns The absolute path of the newly created temporary file.
+     *
+     * @throws {TempFileCreationException} If the temporary file cannot be created.
+     *
+     * @sideeffect Creates the directory (if missing) and an empty file on disk.
+     */
     tempnam(dir: string, prefix: string): string {
         try {
             // Ensure directory exists
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            const tmpDir = fs.mkdtempSync(path.join(dir, prefix));
-            const tmpFile = path.join(tmpDir, prefix + Date.now());
+            const tmpFile = path.join(dir, prefix + crypto.randomUUID());
             fs.writeFileSync(tmpFile, '');
             return tmpFile;
         } catch (error) {
@@ -419,6 +647,12 @@ export class NodeFsSyncAdapter implements SyncFilesystemInterface {
 
     // --- Helpers ---
 
+    /**
+     * Normalises the `paths` argument into an array of strings.
+     *
+     * @param paths - A single path string or an array of path strings.
+     * @returns An array containing the provided path(s).
+     */
     private normalizePaths(paths: string | string[]): string[] {
         if (typeof paths === 'string') {
             return [paths];

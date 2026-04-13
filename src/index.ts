@@ -5,7 +5,6 @@ export { Filesystem } from './Filesystem.js';
 export type { SyncFilesystemInterface } from './interfaces/SyncFilesystemInterface.js';
 export type { AsyncFilesystemInterface } from './interfaces/AsyncFilesystemInterface.js';
 export type { CopyOptions } from './interfaces/CopyOptions.js';
-export type { FilesystemOptions } from './interfaces/FilesystemOptions.js';
 export type { FilesystemAdapterInterface } from './interfaces/AdapterInterface.js';
 
 // Exceptions

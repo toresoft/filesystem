@@ -2,9 +2,9 @@
   "name": "@toresoft/filesystem",
   "version": "1.0.0",
   "description": "A TypeScript filesystem library inspired by Symfony Filesystem component",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
       "import": {
@@ -12,8 +12,8 @@
         "default": "./dist/index.mjs"
       },
       "require": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
       }
     },
     "./in-memory": {
@@ -22,13 +22,13 @@
         "default": "./dist/in-memory.mjs"
       },
       "require": {
-        "types": "./dist/in-memory.d.ts",
-        "default": "./dist/in-memory.js"
+        "types": "./dist/in-memory.d.cts",
+        "default": "./dist/in-memory.cjs"
       }
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsdown",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -48,7 +48,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsup": "^8.0.0",
+    "tsdown": "^0.21.8",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
   }

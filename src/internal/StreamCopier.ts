@@ -4,41 +4,6 @@ import type {Readable, Writable} from 'node:stream';
 import {FileNotFoundException, IOException} from '../exceptions';
 
 /**
- * Copies a file using Node.js streams for memory efficiency.
- * Used internally when the file size exceeds the configured threshold.
- */
-export async function copyWithStreams(
-    originFile: string,
-    targetFile: string,
-): Promise<void> {
-    try {
-        const source = createReadStream(originFile);
-        const destination = createWriteStream(targetFile);
-        await pipeline(source, destination);
-    } catch (error) {
-        if (error instanceof Error) {
-            const nodeError = error as NodeJS.ErrnoException;
-            if (nodeError.code === 'ENOENT') {
-                throw new FileNotFoundException(
-                    `File not found: ${originFile}`,
-                    originFile,
-                    error,
-                );
-            }
-            throw new IOException(
-                `Failed to copy file from "${originFile}" to "${targetFile}": ${nodeError.message}`,
-                originFile,
-                error,
-            );
-        }
-        throw new IOException(
-            `Failed to copy file from "${originFile}" to "${targetFile}": ${String(error)}`,
-            originFile,
-        );
-    }
-}
-
-/**
  * Pipes a Readable stream to a file using Node.js pipeline.
  */
 export async function pipeToFile(

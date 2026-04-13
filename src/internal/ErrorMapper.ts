@@ -1,4 +1,3 @@
-import type {Stats} from 'node:fs';
 import {
     DirectoryAlreadyExistsException,
     DirectoryNotFoundException,
@@ -98,12 +97,4 @@ export function mapError(
 
     // Non-Error thrown — wrap it
     throw new IOException(`Unexpected error: ${String(error)}`, path);
-}
-
-/**
- * Determines the error context based on stat information.
- * If the stat is available and indicates a directory, returns 'directory'.
- */
-export function contextFromStat(stat: Stats): ErrorContext {
-    return stat.isDirectory() ? 'directory' : 'file';
 }

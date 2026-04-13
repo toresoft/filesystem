@@ -3,10 +3,10 @@ import {
     FileNotFoundException,
     FileAlreadyExistsException,
     DirectoryAlreadyExistsException,
-    InvalidArgumentException,
     IOException,
     SymbolicLinkException,
     TempFileCreationException,
+    PermissionDeniedException,
 } from '../src';
 import { InMemoryFilesystemAdapter } from '../src/adapters/in-memory';
 
@@ -89,12 +89,7 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             expect(adapter.sync.readFile('/test.txt', 'base64')).toBe(Buffer.from('ciao').toString('base64'));
         });
 
-        it('should throw InvalidArgumentException for Readable in sync mode', () => {
-            const { Readable } = require('node:stream');
-            const stream = new Readable({ read() {} });
-            expect(() => adapter.sync.dumpFile('/test.txt', stream)).toThrow(InvalidArgumentException);
-        });
-    });
+});
 
     describe('readFileAsBuffer', () => {
         it('should return a Buffer', () => {
@@ -102,6 +97,16 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             const buf = adapter.sync.readFileAsBuffer('/test.bin');
             expect(buf).toBeInstanceOf(Buffer);
             expect(buf).toEqual(Buffer.from([1, 2, 3]));
+        });
+
+        it('should throw IOException when reading a directory', () => {
+            adapter.sync.mkdir('/mydir');
+            expect(() => adapter.sync.readFile('/mydir')).toThrow(IOException);
+        });
+
+        it('should throw IOException when reading a directory as buffer', () => {
+            adapter.sync.mkdir('/mydir');
+            expect(() => adapter.sync.readFileAsBuffer('/mydir')).toThrow(IOException);
         });
     });
 
@@ -121,7 +126,8 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             adapter.sync.mkdir('/mydir');
             expect(() => adapter.sync.appendToFile('/mydir', 'data')).toThrow(IOException);
         });
-    });
+
+});
 
     describe('copy', () => {
         it('should copy a file', () => {
@@ -162,6 +168,23 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             const store: Map<string, any> = (adapter as any).store;
             expect(store.get('/dest.txt').permissions).toBe(0o644);
         });
+
+        it('should throw PermissionDeniedException when source file is not readable', () => {
+            adapter.sync.dumpFile('/source.txt', 'data');
+            adapter.sync.chmod('/source.txt', 0o000);
+            expect(() => adapter.sync.copy('/source.txt', '/dest.txt')).toThrow(PermissionDeniedException);
+        });
+
+        it('should throw IOException when source is a directory', () => {
+            adapter.sync.mkdir('/srcdir');
+            expect(() => adapter.sync.copy('/srcdir', '/dest.txt')).toThrow(IOException);
+        });
+
+        it('should create target directory automatically when copying', () => {
+            adapter.sync.dumpFile('/source.txt', 'data');
+            adapter.sync.copy('/source.txt', '/a/b/c/dest.txt');
+            expect(adapter.sync.readFile('/a/b/c/dest.txt')).toBe('data');
+        });
     });
 
     describe('rename', () => {
@@ -180,6 +203,29 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             adapter.sync.dumpFile('/old.txt', 'old');
             adapter.sync.dumpFile('/new.txt', 'new');
             expect(() => adapter.sync.rename('/old.txt', '/new.txt', false)).toThrow(FileAlreadyExistsException);
+        });
+
+        it('should rename a symlink', () => {
+            adapter.sync.dumpFile('/target.txt', 'data');
+            adapter.sync.symlink('/target.txt', '/link.txt');
+            adapter.sync.rename('/link.txt', '/newlink.txt');
+            expect(adapter.sync.exists('/link.txt')).toBe(false);
+            expect(adapter.sync.readlink('/newlink.txt')).toBe('/target.txt');
+        });
+
+        it('should create target directory automatically when renaming', () => {
+            adapter.sync.dumpFile('/old.txt', 'data');
+            adapter.sync.rename('/old.txt', '/a/b/c/new.txt');
+            expect(adapter.sync.exists('/old.txt')).toBe(false);
+            expect(adapter.sync.readFile('/a/b/c/new.txt')).toBe('data');
+        });
+
+        it('should rename a directory', () => {
+            adapter.sync.mkdir('/olddir');
+            adapter.sync.rename('/olddir', '/newdir');
+            expect(adapter.sync.exists('/olddir')).toBe(false);
+            expect(adapter.sync.exists('/newdir')).toBe(true);
+            expect(adapter.sync.isDirectory('/newdir')).toBe(true);
         });
     });
 
@@ -208,6 +254,23 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             expect(adapter.sync.exists('/a.txt')).toBe(false);
             expect(adapter.sync.exists('/b.txt')).toBe(false);
         });
+
+        it('should throw FileNotFoundException for the first missing path in multi-path remove', () => {
+            // InMemorySyncAdapter throws immediately on first error (no AggregateError)
+            expect(() => adapter.sync.remove(['/missing1.txt', '/missing2.txt'])).toThrow(FileNotFoundException);
+        });
+
+        it('should throw single FileNotFoundException when one path fails', () => {
+            expect(() => adapter.sync.remove('/missing.txt')).toThrow(FileNotFoundException);
+        });
+
+        it('should remove a symlink', () => {
+            adapter.sync.dumpFile('/target.txt', 'data');
+            adapter.sync.symlink('/target.txt', '/link.txt');
+            adapter.sync.remove('/link.txt');
+            expect(adapter.sync.exists('/link.txt')).toBe(false);
+            expect(adapter.sync.exists('/target.txt')).toBe(true);
+        });
     });
 
     describe('touch', () => {
@@ -224,6 +287,23 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             const store: Map<string, any> = (adapter as any).store;
             const node = store.get('/test.txt');
             expect(node.modifiedAt.getTime()).toBe(futureDate.getTime());
+        });
+
+        it('should set both mtime and atime when provided', () => {
+            adapter.sync.dumpFile('/test.txt', 'data');
+            const mtime = new Date(Date.now() + 20000);
+            const atime = new Date(Date.now() + 30000);
+            adapter.sync.touch('/test.txt', mtime, atime);
+            const store: Map<string, any> = (adapter as any).store;
+            const node = store.get('/test.txt');
+            expect(node.modifiedAt.getTime()).toBe(mtime.getTime());
+            expect(node.accessedAt.getTime()).toBe(atime.getTime());
+        });
+
+        it('should touch multiple files at once', () => {
+            adapter.sync.touch(['/a.txt', '/b.txt']);
+            expect(adapter.sync.exists('/a.txt')).toBe(true);
+            expect(adapter.sync.exists('/b.txt')).toBe(true);
         });
     });
 
@@ -320,6 +400,18 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             expect(adapter.sync.isReadable('/missing')).toBe(false);
             expect(adapter.sync.isWritable('/missing')).toBe(false);
         });
+
+        it('should return false for writable when write permission is removed', () => {
+            adapter.sync.dumpFile('/test.txt', 'data');
+            adapter.sync.chmod('/test.txt', 0o444); // read-only
+            expect(adapter.sync.isReadable('/test.txt')).toBe(true);
+            expect(adapter.sync.isWritable('/test.txt')).toBe(false);
+        });
+
+        it('should return true for readable/writable directories', () => {
+            adapter.sync.mkdir('/mydir');
+            expect(adapter.sync.isReadable('/mydir')).toBe(true);
+        });
     });
 
     describe('tempnam', () => {
@@ -360,6 +452,26 @@ describe('InMemoryFilesystemAdapter - Sync API', () => {
             });
             expect(adapter.sync.readFile('/seeded/file1.txt')).toBe('content1');
             expect(adapter.sync.readFile('/seeded/file2.txt')).toBe('content2');
+        });
+
+        it('should normalize paths with .. traversal beyond root', () => {
+            adapter.seed({ '/foo.txt': 'data' });
+            // Path traversal beyond root should resolve to /foo.txt
+            expect(adapter.has('/../../foo.txt')).toBe(true);
+            expect(adapter.has('/a/../foo.txt')).toBe(true);
+            expect(adapter.has('/a/b/../../foo.txt')).toBe(true);
+        });
+
+        it('should normalize paths with backslashes and trailing slashes', () => {
+            adapter.seed({ '/dir/file.txt': 'data' });
+            expect(adapter.has('\\dir\\file.txt')).toBe(true);
+            expect(adapter.has('/dir/file.txt/')).toBe(true);
+        });
+
+        it('should normalize relative paths in seed', () => {
+            adapter.seed({ 'relative.txt': 'data' });
+            expect(adapter.has('/relative.txt')).toBe(true);
+            expect(adapter.sync.readFile('/relative.txt')).toBe('data');
         });
     });
 });
@@ -461,5 +573,31 @@ describe('InMemoryFilesystemAdapter - Async API', () => {
         await adapter.async.mkdir('/tmp');
         const tmpFile = await adapter.async.tempnam('/tmp', 'pfx-');
         expect(await adapter.async.exists(tmpFile)).toBe(true);
+    });
+
+    it('should throw PermissionDeniedException when copying unreadable file', async () => {
+        await adapter.async.dumpFile('/source.txt', 'data');
+        adapter.sync.chmod('/source.txt', 0o000);
+        await expect(adapter.async.copy('/source.txt', '/dest.txt')).rejects.toThrow(PermissionDeniedException);
+    });
+
+    it('should throw FileNotFoundException when renaming non-existent file', async () => {
+        await expect(adapter.async.rename('/missing.txt', '/new.txt')).rejects.toThrow(FileNotFoundException);
+    });
+
+    it('should throw FileAlreadyExistsException when renaming with overwrite=false', async () => {
+        await adapter.async.dumpFile('/old.txt', 'old');
+        await adapter.async.dumpFile('/new.txt', 'new');
+        await expect(adapter.async.rename('/old.txt', '/new.txt', false)).rejects.toThrow(FileAlreadyExistsException);
+    });
+
+    it('should throw FileNotFoundException when copying non-existent file', async () => {
+        await expect(adapter.async.copy('/missing.txt', '/dest.txt')).rejects.toThrow(FileNotFoundException);
+    });
+
+    it('should throw FileAlreadyExistsException when copying with overwrite=false', async () => {
+        await adapter.async.dumpFile('/src.txt', 'src');
+        await adapter.async.dumpFile('/dst.txt', 'dst');
+        await expect(adapter.async.copy('/src.txt', '/dst.txt', { overwrite: false })).rejects.toThrow(FileAlreadyExistsException);
     });
 });
